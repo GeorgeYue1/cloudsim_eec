@@ -18,10 +18,14 @@ struct MachineInformation {
 
 static vector<MachineInformation> cluster;
 
+/**
+ * Checks if the machine can service the given task
+ */
 bool exceedsLoadFactor(TaskId_t task_id, MachineInfo_t machine_info) {
     TaskInfo_t task_info = GetTaskInfo(task_id); 
     return (machine_info.memory_used + task_info.required_memory) > machine_info.memory_size;
 }
+
 // Helper function to check if VM type is compatible with CPU type
 bool IsVMCompatibleWithCPU(VMType_t vm_type, CPUType_t cpu_type) {
     switch(vm_type) {
@@ -39,7 +43,7 @@ bool IsVMCompatibleWithCPU(VMType_t vm_type, CPUType_t cpu_type) {
 
 /**
  * Returns VMId if there's a vm that's compatible with the task 
- * Otherwise, returns -1; 
+ * Otherwise, returns UINT_MAX; 
  */
 VMId_t isTaskCompatible(TaskId_t task_id, MachineInfo_t machine_info) {
     TaskInfo_t task_info = GetTaskInfo(task_id); 
@@ -96,7 +100,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
             }
         }
     }
-    
+
 }
 
 void Scheduler::PeriodicCheck(Time_t now) {
@@ -143,6 +147,55 @@ void HandleNewTask(Time_t time, TaskId_t task_id) {
 
 void HandleTaskCompletion(Time_t time, TaskId_t task_id) {
     SimOutput("HandleTaskCompletion(): Task " + to_string(task_id) + " completed at time " + to_string(time), 4);
+
+    // TaskInfo_t task_info = GetTaskInfo(task_id); 
+    // vector<pair<uint64_t, MachineId_t>> machine_utilizations;
+    // for(auto& machine : cluster) {
+    //     MachineInfo_t machine_info = Machine_GetInfo(machine.machine_id);
+    //     machine_utilizations.push_back({machine_info.memory_used, machine.machine_id}); 
+    // }
+
+    // sort(machine_utilizations.begin(), machine_utilizations.end()); 
+
+    // int mid = machine_utilizations.size() / 2; 
+    // vector<pair<uint64_t, MachineId_t>> first_half(machine_utilizations.begin(), machine_utilizations.begin() + mid);
+    // vector<pair<uint64_t, MachineId_t>> second_half(machine_utilizations.begin() + mid, machine_utilizations.end());
+    
+    // for(auto &low_pair : first_half) {
+    //     uint64_t utilization_low = low_pair.first;
+    //     MachineId_t low_machine_id = low_pair.second;
+
+    //     if(cluster[low_machine_id].vms.empty()) {
+    //         continue;
+    //     }
+    //     VMId_t smallest_vm = cluster[low_machine_id].vms[0];
+
+    //     for(auto &high_pair : second_half) {
+    //         MachineId_t high_machine_id = high_pair.second;
+    //         MachineInfo_t high_info = Machine_GetInfo(high_machine_id);
+
+    //         // Matching CPU type and sufficient free memory
+    //         int total_memory_used = 0;
+    //         VMInfo_t vm_info = VM_GetInfo(smallest_vm); 
+    //         for(TaskId_t task_id : vm_info.active_tasks) {
+    //             total_memory_used += GetTaskMemory(task_id); 
+    //         }
+            
+    //         if(VM_GetInfo(smallest_vm).cpu == Machine_GetCPUType(high_machine_id) &&
+    //             total_memory_used + high_info.memory_used <= high_info.memory_size) {
+    //             // Remove VM from old machine
+    //             auto it = find(cluster[low_machine_id].vms.begin(),
+    //                            cluster[low_machine_id].vms.end(),
+    //                            smallest_vm);
+    //             if(it != cluster[low_machine_id].vms.end()) {
+    //                 cluster[low_machine_id].vms.erase(it);
+    //             }
+    //             VM_Migrate(smallest_vm, high_machine_id);
+    //             migrating = true; 
+    //             break; 
+    //         }
+    //     }
+    // }
     Scheduler.TaskComplete(time, task_id);
 }
 
@@ -153,6 +206,7 @@ void MemoryWarning(Time_t time, MachineId_t machine_id) {
 
 void MigrationDone(Time_t time, VMId_t vm_id) {
     // The function is called on to alert you that migration is complete
+    migrating = false; 
     SimOutput("MigrationDone(): Migration of VM " + to_string(vm_id) + " was completed at time " + to_string(time), 4);
 }
 
