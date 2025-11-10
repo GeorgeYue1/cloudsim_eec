@@ -66,6 +66,8 @@ void Scheduler::Init() {
         cluster[i].memory_size = info.memory_size;
         cluster[i].memory_used = info.memory_used;
 
+        // Machine_SetState(cluster[i].id, S5);
+        // cluster[i].active = false;
         VM_Attach(cluster[i].vm_id, cluster[i].id);
         vm_ready[cluster[i].vm_id] = true;
     }
@@ -86,14 +88,14 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     for(auto &machine: cluster) {
         if(!machine.active) continue;
         
-        MachineInfo_t info = Machine_GetInfo(machine.id);
-        if(info.cpu != req_cpu_type || info.s_state != S0) continue;
+        MachineInfo_t machine_info = Machine_GetInfo(machine.id);
+        if(machine_info.cpu != req_cpu_type || machine_info.s_state != S0) continue;
         if(vm_ready.find(machine.vm_id) == vm_ready.end() || !vm_ready[machine.vm_id]) continue;
         if(vm_types.find(machine.vm_id) == vm_types.end() || vm_types[machine.vm_id] != req_vm_type) continue;
         
-        unsigned active_tasks = info.active_tasks;
-        unsigned num_cpus = info.num_cpus;
-        unsigned avail_mem = info.memory_size - info.memory_used;
+        unsigned active_tasks = machine_info.active_tasks;
+        unsigned num_cpus = machine_info.num_cpus;
+        unsigned avail_mem = machine_info.memory_size - machine_info.memory_used;
         
         if(active_tasks < num_cpus && req_mem <= avail_mem && IsVMReady(machine.vm_id, machine.id)) {
             VM_AddTask(machine.vm_id, task_id, MID_PRIORITY);
@@ -108,16 +110,17 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     for(auto &machine: cluster) {
         if(!machine.active) continue;
         
-        MachineInfo_t info = Machine_GetInfo(machine.id);
-        if(info.cpu != req_cpu_type || info.s_state != S0) continue;
-        if(!IsVMCompatibleWithCPU(req_vm_type, info.cpu)) continue;
+        MachineInfo_t machine_info = Machine_GetInfo(machine.id);
+        if(machine_info.cpu != req_cpu_type || machine_info.s_state != S0) continue;
+        if(!IsVMCompatibleWithCPU(req_vm_type, machine_info.cpu)) continue;
         
-        unsigned active_tasks = info.active_tasks;
-        unsigned num_cpus = info.num_cpus;
-        unsigned avail_mem = info.memory_size - info.memory_used;
+        unsigned active_tasks = machine_info.active_tasks;
+        unsigned num_cpus = machine_info.num_cpus;
+        unsigned avail_mem = machine_info.memory_size - machine_info.memory_used;
         
         if(active_tasks < num_cpus && req_mem <= avail_mem) {
             if(vm_ready[machine.vm_id]) {
+                // TODO can't shutdown if VM has active tasks
                 VM_Shutdown(machine.vm_id);
                 vm_ready[machine.vm_id] = false;
             }
@@ -210,7 +213,7 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
                 MachineInfo_t dst_info = Machine_GetInfo(dst_id);
                 
                 if(u_src + u_dst < dst_info.num_cpus && vm_ready[cluster[src_id].vm_id]) {
-                    VM_Migrate(cluster[src_id].vm_id, dst_id);
+                    // VM_Migrate(cluster[src_id].vm_id, dst_id);
                     migrating = true;
                     vm_ready[cluster[src_id].vm_id] = false;
                     return;
@@ -314,12 +317,12 @@ void StateChangeComplete(Time_t time, MachineId_t machine_id) {
                 }
                 
                 unsigned req_mem = GetTaskMemory(task_id);
-                MachineInfo_t info = Machine_GetInfo(machine.id);
+                MachineInfo_t machine_info = Machine_GetInfo(machine.id);
                 
-                if(info.active_tasks < info.num_cpus && req_mem <= (info.memory_size - info.memory_used)) {
+                if(machine_info.active_tasks < machine_info.num_cpus && req_mem <= (machine_info.memory_size - machine_info.memory_used)) {
                     VM_AddTask(machine.vm_id, task_id, MID_PRIORITY);
                     task_map[task_id] = machine.id;
-                    machine.utilization = info.active_tasks + 1;
+                    machine.utilization = machine_info.active_tasks + 1;
                     machine.memory_used += req_mem;
                 } else {
                     pending_tasks[machine_id].push(task_id);
