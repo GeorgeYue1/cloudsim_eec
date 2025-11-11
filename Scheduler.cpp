@@ -14,17 +14,102 @@ static bool migrating = false;
 struct MachineInformation {
     MachineId_t machine_id;
     vector<VMId_t> vms; 
+    
 };
 
 static vector<MachineInformation> cluster;
+unordered_map<MachineId_t, vector<TaskId_t>> pending_tasks; 
+/**
+ * Computes the pending execution time of a machine
+ * based on sum of remaining instructions of all tasks divided by MIPS capacity.
+ */
+    double pendingExecutionTime(MachineId_t machine_id) {
+        MachineInfo_t machine_info = Machine_GetInfo(machine_id);
+        double total_instructions = 0.0;
+        
+        for(VMId_t vm_id : cluster[machine_id].vms) {
+            VMInfo_t vm_info = VM_GetInfo(vm_id);
+            for(TaskId_t t_id : vm_info.active_tasks) {
+                TaskInfo_t t_info = GetTaskInfo(t_id);
+                total_instructions += (double)t_info.remaining_instructions;
+            }
+        }
+
+        double total_mips = (double)machine_info.performance[machine_info.p_state] * machine_info.num_cpus;
+        if (total_mips == 0) return DBL_MAX;  // avoid division by zero
+        return total_instructions / (total_mips * 1e6); // in seconds
+    }
+
+
+    /**
+     * Checks if the machine can service the given task
+     */
+    bool canScheduleTask(TaskId_t task_id, MachineId_t machine_id) {
+        TaskInfo_t task_info = GetTaskInfo(task_id); 
+        MachineInfo_t machine_info = Machine_GetInfo(machine_id);
+
+        if((machine_info.memory_used + task_info.required_memory) > machine_info.memory_size) {
+            return false; 
+        }
+
+        double PET = pendingExecutionTime(machine_info.machine_id); 
+        // cout << "PET: " << PET << endl;
+        // cout << "task_info.target_completion: " << task_info.target_completion << endl;
+        // cout << "task_info.arrival: " << task_info.arrival << endl;
+
+        double target_time_sec = max(1e-6, (double)(task_info.target_completion - task_info.arrival) / 1e6);
+
+        double total_mips = (double)machine_info.performance[machine_info.p_state] * machine_info.num_cpus;
+        double task_execution_time = (double)task_info.total_instructions / (total_mips *1e6);
+
+        switch(task_info.required_sla) {
+            case SLA0:
+                // cout << task_execution_time + PET + 1 << " " << target_time_sec << endl;
+                return task_execution_time + PET + 1 <= target_time_sec;
+            case SLA1:
+                return task_execution_time + PET + 0.5 <= target_time_sec;
+            case SLA2:
+                return task_execution_time + PET + 0.25 <= target_time_sec;
+            case SLA3:
+                return task_execution_time + PET <= target_time_sec;
+        }
+
+    }
 
 /**
- * Checks if the machine can service the given task
+ * Prints all information for a specific machine
+ * Cred: ChatGPT :) 
  */
-bool exceedsLoadFactor(TaskId_t task_id, MachineInfo_t machine_info) {
-    TaskInfo_t task_info = GetTaskInfo(task_id); 
-    return (machine_info.memory_used + task_info.required_memory) > machine_info.memory_size;
+void printMachineInfo(MachineId_t machine_id) {
+    MachineInfo_t m = Machine_GetInfo(machine_id);
+
+    cout << "\n==============================\n";
+    cout << "📘 Machine Information\n";
+    cout << "------------------------------\n";
+    cout << "Machine ID       : " << m.machine_id << endl;
+    cout << "State (S-state)  : " << m.s_state << "  (0=S0 active, 5=S5 off)" << endl;
+    cout << "CPU Type         : ";
+    switch (m.cpu) {
+        case ARM:   cout << "ARM"; break;
+        case POWER: cout << "POWER"; break;
+        case RISCV: cout << "RISC-V"; break;
+        case X86:   cout << "x86"; break;
+        default:    cout << "Unknown"; break;
+    }
+    cout << endl;
+
+    cout << "CPU Performance  : P" << m.p_state << endl;
+    cout << "Number of CPUs   : " << m.num_cpus << endl;
+    cout << "GPU Present?     : " << (m.gpus ? "Yes" : "No") << endl;
+    cout << "Memory Usage     : " << m.memory_used << " / " << m.memory_size << " MB" << endl;
+    cout << "Active Tasks     : " << m.active_tasks << endl;
+    cout << "Active VMs       : " << m.active_vms << endl;
+    cout << "Energy Consumed  : " << fixed << setprecision(4)
+         << (double)m.energy_consumed / 1000.0 << " kWh" << endl;
+
+    cout << "==============================\n\n";
 }
+
 
 // Helper function to check if VM type is compatible with CPU type
 bool IsVMCompatibleWithCPU(VMType_t vm_type, CPUType_t cpu_type) {
@@ -65,12 +150,17 @@ void Scheduler::Init() {
     SimOutput("Scheduler::Init(): Total machines = " + to_string(total), 2);
     cluster.resize(total);
 
-    for (unsigned i = 0; i < total; i++) {
-        cluster[i].machine_id = MachineId_t(i);
-        MachineInfo_t machine_info = Machine_GetInfo(cluster[i].machine_id);
-        VMId_t vm_id = VM_Create(LINUX, machine_info.cpu);
-        cluster[i].vms.push_back(vm_id);
-        VM_Attach(vm_id, cluster[i].machine_id);
+    for(unsigned i = 0; i < total; i++) {
+        MachineId_t machine_id = MachineId_t(i);
+        cluster[i].machine_id = machine_id; 
+        if(i < total / 2) {
+            MachineInfo_t machine_info = Machine_GetInfo(cluster[i].machine_id);
+            VMId_t vm_id = VM_Create(LINUX, machine_info.cpu);
+            cluster[i].vms.push_back(vm_id);
+            VM_Attach(vm_id, cluster[i].machine_id);
+        } else {
+            // Machine_SetState(machine_id, S5); 
+        }
     }
 
     SimOutput("Scheduler::Init(): Greedy scheduler initialized.", 2);
@@ -79,6 +169,29 @@ void Scheduler::Init() {
 void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
     // vm_ready[vm_id] = true;
 }
+
+/**
+ * Turns off all idle machines
+ */
+void turnOffIdleMachines() {
+    for(auto &machine : cluster) {
+        bool shutDownMachine = true; 
+        for(VMId_t vm_id : machine.vms) {
+            VMInfo_t vm_info = VM_GetInfo(vm_id); 
+            if(!vm_info.active_tasks.empty()) {
+                shutDownMachine = false; 
+                break; 
+            }
+        }
+        if(shutDownMachine) {
+            // for(VMId_t vm_id : machine.vms) {
+            //     VM_Shutdown(vm_id); 
+            // }
+            Machine_SetState(machine.machine_id, S5); 
+        }
+    }
+}
+
 
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     TaskInfo_t task_info = GetTaskInfo(task_id); 
@@ -89,19 +202,104 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     }
 
     sort(machine_utilizations.begin(), machine_utilizations.end()); 
+    // 1) Try existing active machines (S0) with compatible VMs
+    for(auto &p : machine_utilizations) {
+        auto machine = cluster[p.second];
+        MachineInfo_t m_info = Machine_GetInfo(machine.machine_id);
+        if(m_info.s_state == S5 || m_info.cpu != task_info.required_cpu) {
+            continue; 
+        } 
 
-    for(auto& utilizations : machine_utilizations) {
-        MachineInfo_t machine_info = Machine_GetInfo(utilizations.second);
-        if(machine_info.s_state != S5 && !exceedsLoadFactor(task_id, machine_info)) {
-            VMId_t vm_id = isTaskCompatible(task_id, machine_info); 
-            if(vm_id != UINT_MAX) {
-                VM_AddTask(vm_id, task_id, MID_PRIORITY); 
-                break; 
-            }
+        VMId_t vm_id = isTaskCompatible(task_id, m_info);
+        if (vm_id != UINT_MAX && canScheduleTask(task_id, machine.machine_id)) {
+            VM_AddTask(vm_id, task_id, MID_PRIORITY);
+            return;
         }
     }
 
+    for(auto &p : machine_utilizations) {
+        auto machine = cluster[p.second];
+        MachineInfo_t m_info = Machine_GetInfo(machine.machine_id);
+        if(m_info.s_state == S5 || m_info.cpu != task_info.required_cpu) {
+            continue;
+        }
+
+        // If machine has no VMs or no compatible VM but can schedule, create one
+        if(canScheduleTask(task_id, machine.machine_id)) {
+            // try to find compatible VM first
+            VMId_t vm_id = isTaskCompatible(task_id, m_info);
+            if(vm_id == UINT_MAX) {
+                vm_id = VM_Create(task_info.required_vm, task_info.required_cpu);
+                VM_Attach(vm_id, machine.machine_id);
+                cluster[machine.machine_id].vms.push_back(vm_id);
+            }
+            VM_AddTask(vm_id, task_id, MID_PRIORITY);
+            return;
+        }
+    }
+
+    // 3) No active machine could serve it — try waking a sleeping machine
+    for(auto &p : machine_utilizations) {
+        auto machine = cluster[p.second];
+        MachineInfo_t m_info = Machine_GetInfo(machine.machine_id);
+        if(m_info.s_state != S5 || m_info.cpu != task_info.required_cpu) {
+            continue; 
+        }
+        auto &vec = pending_tasks[machine.machine_id];
+        if(find(vec.begin(), vec.end(), task_id) == vec.end()) {
+            vec.push_back(task_id);
+            Machine_SetState(machine.machine_id, S0);
+        }
+        return;
+    }
+
+    SimOutput("NewTask(): Could not schedule task " + to_string(task_id), 2);
 }
+
+// void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
+
+    // TaskInfo_t task_info = GetTaskInfo(task_id); 
+    // vector<pair<uint64_t, MachineId_t>> machine_utilizations;
+    // for(auto& machine : cluster) {
+    //     MachineInfo_t machine_info = Machine_GetInfo(machine.machine_id);
+    //     machine_utilizations.push_back({machine_info.energy_consumed, machine.machine_id}); 
+    // }
+
+    // sort(machine_utilizations.begin(), machine_utilizations.end()); 
+
+//     for(auto& utilizations : machine_utilizations) {
+//         uint64_t utilization = utilizations.first; 
+//         MachineId_t machine_id = utilizations.second; 
+//         MachineInfo_t machine_info = Machine_GetInfo(machine_id);
+//         if(machine_info.s_state != S5 && machine_info.cpu == task_info.required_cpu && canScheduleTask(task_id, machine_id)) {
+//             // printMachineInfo(machine_info.machine_id); 
+//             VMId_t vm_id = isTaskCompatible(task_id, machine_info); 
+//             if(vm_id == UINT_MAX) {
+//                 vm_id = VM_Create(task_info.required_vm, task_info.required_cpu); 
+//                 VM_Attach(vm_id, machine_id); 
+//             } 
+//             cluster[machine_id].vms.push_back(vm_id); 
+//             VM_AddTask(vm_id, task_id, MID_PRIORITY);         
+            
+//             // turnOffIdleMachines();
+//             return;
+//         }
+//     }
+
+//     // for(auto& utilizations : machine_utilizations) {
+//     //     uint64_t utilization = utilizations.first; 
+//     //     MachineId_t machine_id = utilizations.second; 
+//     //     MachineInfo_t machine_info = Machine_GetInfo(machine_id);
+//     //     // printMachineInfo(machine_info.machine_id); 
+//     //     if(machine_info.s_state == S5 && machine_info.cpu == task_info.required_cpu) {
+//     //         pending_tasks[machine_id].push_back(task_id);
+//     //         Machine_SetState(machine_id, S0); 
+//     //         return; 
+//     //     }
+//     // }
+
+//     // ThrowException("Could not schedule task."); 
+// }
 
 void Scheduler::PeriodicCheck(Time_t now) {
     // Periodic optimization can be added here if needed
@@ -119,7 +317,8 @@ void Scheduler::PeriodicCheck(Time_t now) {
 void Scheduler::Shutdown(Time_t time) {
     for(auto &machine: cluster) {
         for(VMId_t vm_id: machine.vms) {
-            VM_Shutdown(vm_id); 
+
+            // VM_Shutdown(vm_id); 
         }
     }
     SimOutput("SimulationComplete(): Finished!", 4);
@@ -148,60 +347,13 @@ void HandleNewTask(Time_t time, TaskId_t task_id) {
 void HandleTaskCompletion(Time_t time, TaskId_t task_id) {
     SimOutput("HandleTaskCompletion(): Task " + to_string(task_id) + " completed at time " + to_string(time), 4);
 
-    // TaskInfo_t task_info = GetTaskInfo(task_id); 
-    // vector<pair<uint64_t, MachineId_t>> machine_utilizations;
-    // for(auto& machine : cluster) {
-    //     MachineInfo_t machine_info = Machine_GetInfo(machine.machine_id);
-    //     machine_utilizations.push_back({machine_info.memory_used, machine.machine_id}); 
-    // }
-
-    // sort(machine_utilizations.begin(), machine_utilizations.end()); 
-
-    // int mid = machine_utilizations.size() / 2; 
-    // vector<pair<uint64_t, MachineId_t>> first_half(machine_utilizations.begin(), machine_utilizations.begin() + mid);
-    // vector<pair<uint64_t, MachineId_t>> second_half(machine_utilizations.begin() + mid, machine_utilizations.end());
     
-    // for(auto &low_pair : first_half) {
-    //     uint64_t utilization_low = low_pair.first;
-    //     MachineId_t low_machine_id = low_pair.second;
-
-    //     if(cluster[low_machine_id].vms.empty()) {
-    //         continue;
-    //     }
-    //     VMId_t smallest_vm = cluster[low_machine_id].vms[0];
-
-    //     for(auto &high_pair : second_half) {
-    //         MachineId_t high_machine_id = high_pair.second;
-    //         MachineInfo_t high_info = Machine_GetInfo(high_machine_id);
-
-    //         // Matching CPU type and sufficient free memory
-    //         int total_memory_used = 0;
-    //         VMInfo_t vm_info = VM_GetInfo(smallest_vm); 
-    //         for(TaskId_t task_id : vm_info.active_tasks) {
-    //             total_memory_used += GetTaskMemory(task_id); 
-    //         }
-            
-    //         if(VM_GetInfo(smallest_vm).cpu == Machine_GetCPUType(high_machine_id) &&
-    //             total_memory_used + high_info.memory_used <= high_info.memory_size) {
-    //             // Remove VM from old machine
-    //             auto it = find(cluster[low_machine_id].vms.begin(),
-    //                            cluster[low_machine_id].vms.end(),
-    //                            smallest_vm);
-    //             if(it != cluster[low_machine_id].vms.end()) {
-    //                 cluster[low_machine_id].vms.erase(it);
-    //             }
-    //             VM_Migrate(smallest_vm, high_machine_id);
-    //             migrating = true; 
-    //             break; 
-    //         }
-    //     }
-    // }
     Scheduler.TaskComplete(time, task_id);
 }
 
 void MemoryWarning(Time_t time, MachineId_t machine_id) {
     // The simulator is alerting you that machine identified by machine_id is overcommitted
-    SimOutput("MemoryWarning(): Overflow at " + to_string(machine_id) + " was detected at time " + to_string(time), 0);
+    SimOutput("MemoryWarning(): Overflow at " + to_string(machine_id) + " was detected at time " + to_string(time), 4);
 }
 
 void MigrationDone(Time_t time, VMId_t vm_id) {
@@ -226,52 +378,32 @@ void SimulationComplete(Time_t time) {
     cout << "Simulation run finished in " << double(time)/1000000 << " seconds" << endl;
     SimOutput("SimulationComplete(): Simulation finished at time " + to_string(time), 4);
     
+    for(auto &machine : cluster) {
+        // printMachineInfo(machine.machine_id);
+    }
+
     Scheduler.Shutdown(time);
 }
 
 void SLAWarning(Time_t time, TaskId_t task_id) {
-    
+
 }
 
 void StateChangeComplete(Time_t time, MachineId_t machine_id) {
     SimOutput("StateChangeComplete(): Machine " + to_string(machine_id) + " state change complete at " + to_string(time), 3);
-    
-    // for(auto &machine: cluster) {
-    //     if(machine.id == machine_id) {
-    //         machine.active = true;
-            
-    //         VMInfo_t vm_info = VM_GetInfo(machine.vm_id);
-    //         if(vm_info.machine_id != machine.id) {
-    //             VM_Attach(machine.vm_id, machine.id);
-    //             vm_info = VM_GetInfo(machine.vm_id);
-    //         }
-    //         vm_ready[machine.vm_id] = (vm_info.machine_id == machine.id);
-            
-    //         // Process pending tasks
-    //         while(!pending_tasks[machine_id].empty()) {
-    //             TaskId_t task_id = pending_tasks[machine_id].front();
-    //             pending_tasks[machine_id].pop();
-                
-    //             if(!IsVMReady(machine.vm_id, machine.id)) {
-    //                 pending_tasks[machine_id].push(task_id);
-    //                 break;
-    //             }
-                
-    //             unsigned req_mem = GetTaskMemory(task_id);
-    //             MachineInfo_t machine_info = Machine_GetInfo(machine.id);
-                
-    //             if(machine_info.active_tasks < machine_info.num_cpus && req_mem <= (machine_info.memory_size - machine_info.memory_used)) {
-    //                 VM_AddTask(machine.vm_id, task_id, MID_PRIORITY);
-    //                 task_map[task_id] = machine.id;
-    //                 machine.utilization = machine_info.active_tasks + 1;
-    //                 machine.memory_used += req_mem;
-    //             } else {
-    //                 pending_tasks[machine_id].push(task_id);
-    //                 break;
-    //             }
-    //         }
-    //         break;
-    //     }
-    // }
+    if(pending_tasks.find(machine_id) == pending_tasks.end()) {
+        return; 
+    }
+
+    for(TaskId_t task_id: pending_tasks[machine_id]) {
+        TaskInfo_t task_info = GetTaskInfo(task_id); 
+        VMId_t vm_id = VM_Create(task_info.required_vm, task_info.required_cpu); 
+        VM_Attach(vm_id, machine_id); 
+        cluster[machine_id].vms.push_back(vm_id); 
+        VM_AddTask(vm_id, task_id, MID_PRIORITY); 
+    }
+
+    pending_tasks.erase(machine_id); 
 }
+
 
