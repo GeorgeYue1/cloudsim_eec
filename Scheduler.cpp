@@ -66,14 +66,16 @@ bool canScheduleTask(TaskId_t task_id, MachineId_t machine_id) {
     double total_mips = (double)machine_info.performance[machine_info.p_state] * machine_info.num_cpus;
     double task_execution_time = (double)task_info.total_instructions / (total_mips *1e6);
 
+    // SimOutput("task execution time: " + to_string(task_execution_time), 1); 
     // Allow for some margin of error for SLA violations
+    // SimOutput("target time: " + to_string(target_time_sec), 1); 
     switch(task_info.required_sla) {
         case SLA0:
-            return task_execution_time + PET + 10 <= target_time_sec;
+            return task_execution_time + PET + 7 <= target_time_sec;
         case SLA1:
-            return task_execution_time + PET + 5<= target_time_sec;
+            return task_execution_time + PET + 5 <= target_time_sec;
         case SLA2:
-            return task_execution_time + PET + 3 <= target_time_sec;
+            return task_execution_time + PET + 1 <= target_time_sec;
         case SLA3:
             return task_execution_time + PET <= target_time_sec;
         default:
@@ -266,6 +268,24 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
         return;
     }
 
+    // Cannot find ideal machine, just choose first active machine to schedule it on
+
+    for(auto &machine : cluster) {
+        MachineInfo_t m_info = Machine_GetInfo(machine.machine_id);
+        if(!ready[machine.machine_id] || m_info.s_state == S5 || m_info.cpu != task_info.required_cpu) {
+            continue; 
+        }
+        VMId_t vm_id = isTaskCompatible(task_id, m_info);
+        if(vm_id == UINT_MAX) {
+            vm_id = VM_Create(task_info.required_vm, task_info.required_cpu);
+            VM_Attach(vm_id, machine.machine_id);
+            cluster[machine.machine_id].vms.push_back(vm_id);
+        }
+        cluster[machine.machine_id].last_referenced = now; 
+        VM_AddTask(vm_id, task_id, MID_PRIORITY);
+        SimOutput("Task assigned to machine  " + to_string(machine.machine_id), 1);
+        return;
+    }
     // ThrowException("Could not allocate task"); 
     SimOutput("NewTask(): Could not schedule task " + to_string(task_id), 2);
 }
