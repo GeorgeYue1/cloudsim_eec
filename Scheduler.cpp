@@ -157,17 +157,8 @@ void Scheduler::Init() {
 
     for(unsigned i = 0; i < total; i++) {
         MachineId_t machine_id = MachineId_t(i);
-        if(i < total / 3) {
-            running[machine_id];
-            ready[machine_id] = true; 
-        } else if(i < 2*total/3){
-            ready[machine_id] = true; 
-            intermediate[machine_id];
-        } else {
-            ready[machine_id] = false; 
-            off[machine_id];
-            Machine_SetState(machine_id, S5); 
-        }
+        running[machine_id];
+        ready[machine_id] = true; 
         last_referenced[machine_id] = 0; 
     }
 
@@ -181,7 +172,29 @@ void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
 /**
  * Turns off all idle machines
  */
-void turnOffIdleMachines(Time_t now) {
+void adjust(Time_t now) {
+    vector<MachineId_t> removeRunning; 
+    for(auto &[machine_id, vms] : running) {
+        MachineInfo_t machine_info = Machine_GetInfo(machine_id); 
+        bool shutDownMachine = true; 
+        for(VMId_t vm_id : vms) {
+            VMInfo_t vm_info = VM_GetInfo(vm_id); 
+            if(!vm_info.active_tasks.empty()) {
+                shutDownMachine = false; 
+                break; 
+            }
+        }  
+        if(shutDownMachine) {
+            removeRunning.push_back(machine_id); 
+            intermediate[machine_id]; 
+        }
+    }
+    
+    for(MachineId_t machine_id : removeRunning) {
+        running.erase(machine_id); 
+    }
+
+    vector<MachineId_t> removeIntermediate; 
     for(auto &[machine_id, vms] : intermediate) {
         MachineInfo_t machine_info = Machine_GetInfo(machine_id); 
         bool shutDownMachine = true; 
@@ -202,19 +215,24 @@ void turnOffIdleMachines(Time_t now) {
                 // cout << "Machine " << machine.machine_id << " turned off" << endl; 
                 SimOutput("Machine " + to_string(machine_info.machine_id) + " turned off", 1); 
                 ready[machine_id] = false; 
+                removeIntermediate.push_back(machine_id); 
                 Machine_SetState(machine_id, S5); 
             }
-        }
+        } 
+    }
+    
+    for(MachineId_t machine_id : removeIntermediate) {
+        intermediate.erase(machine_id); 
     }
 }
 
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     TaskInfo_t task_info = GetTaskInfo(task_id); 
 
-    // if((task_id % 3000) == 0 && task_id != 0) {
-    //     SimOutput("Turning off idle machines", 1); 
-    //     turnOffIdleMachines(now); 
-    // }
+    if((task_id % 3000) == 0 && task_id != 0) {
+        SimOutput("Turning off idle machines", 1); 
+        adjust(now); 
+    }
 
     for(auto &[machine_id, vms] : running) {
         MachineInfo_t m_info = Machine_GetInfo(machine_id);
@@ -242,11 +260,16 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
         if(!ready[machine_id] || m_info.cpu != task_info.required_cpu) {
             continue;
         }
-        VMId_t vm_id = VM_Create(task_info.required_vm, task_info.required_cpu);
-        VM_Attach(vm_id, machine_id);
-        running[machine_id].push_back(vm_id);
-        VM_AddTask(vm_id, task_id, MID_PRIORITY);
+        VMId_t vm_id = isTaskCompatible(task_id, m_info);
+        if(vm_id == UINT_MAX) {
+            vm_id = VM_Create(task_info.required_vm, task_info.required_cpu);
+            VM_Attach(vm_id, machine_id);
+            running[machine_id].push_back(vm_id);
+        }
         last_referenced[machine_id] = now; 
+        VM_AddTask(vm_id, task_id, MID_PRIORITY);
+        running[machine_id].push_back(vm_id); 
+        SimOutput("Task assigned to machine  " + to_string(machine_id), 1);
         erase_id = machine_id; 
         break; 
     }
@@ -283,6 +306,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
             vm_id = VM_Create(task_info.required_vm, task_info.required_cpu);
             VM_Attach(vm_id, machine_id);
         }
+        last_referenced[machine_id] = now; 
         VM_AddTask(vm_id, task_id, MID_PRIORITY);
         running[machine_id].push_back(vm_id);
         return; 
@@ -380,16 +404,21 @@ void StateChangeComplete(Time_t time, MachineId_t machine_id) {
     MachineInfo_t machine_info = Machine_GetInfo(machine_id);
     if(machine_info.s_state == S0) {
         for(TaskId_t task_id: pending_tasks[machine_id]) {
+            VMId_t vm_id = isTaskCompatible(task_id, machine_info);
             TaskInfo_t task_info = GetTaskInfo(task_id); 
-            VMId_t vm_id = VM_Create(task_info.required_vm, task_info.required_cpu); 
-            VM_Attach(vm_id, machine_id); 
+            if(vm_id == UINT_MAX) {
+                vm_id = VM_Create(task_info.required_vm, task_info.required_cpu);
+                VM_Attach(vm_id, machine_id);
+            }
             running[machine_id].push_back(vm_id); 
             off.erase(machine_id); 
             VM_AddTask(vm_id, task_id, MID_PRIORITY); 
         }
         pending_tasks.erase(machine_id); 
     }
-
+    if(machine_info.s_state == S5) {
+        off[machine_id];
+    }
 }
 
 
