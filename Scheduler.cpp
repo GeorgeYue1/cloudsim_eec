@@ -71,11 +71,11 @@ bool canScheduleTask(TaskId_t task_id, MachineId_t machine_id) {
     switch(task_info.required_sla) {
         case SLA0:
             // cout << task_execution_time + PET + 1 << " " << target_time_sec << endl;
-            return task_execution_time + PET + 1 <= target_time_sec;
+            return task_execution_time + PET + 7 <= target_time_sec;
         case SLA1:
-            return task_execution_time + PET + 0.5 <= target_time_sec;
+            return task_execution_time + PET + 5 <= target_time_sec;
         case SLA2:
-            return task_execution_time + PET + 0.25 <= target_time_sec;
+            return task_execution_time + PET + 3 <= target_time_sec;
         case SLA3:
             return task_execution_time + PET <= target_time_sec;
     }
